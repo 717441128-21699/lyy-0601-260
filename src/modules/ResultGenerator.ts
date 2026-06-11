@@ -179,10 +179,41 @@ export class ResultGenerator {
       .map(r => r.noteId);
   }
 
-  getJudgeErrorOffsets(): Array<{ noteId: string; offset: number; level: JudgeLevel }> {
+  getJudgeErrorOffsets(): Array<{ noteId: string; offset: number; level: JudgeLevel; startOffset?: number; actualEndTrack?: number; autoSettled?: boolean }> {
     return this.noteResults
       .filter(r => r.level !== JudgeLevel.PERFECT)
-      .map(r => ({ noteId: r.noteId, offset: r.offset, level: r.level }));
+      .map(r => ({
+        noteId: r.noteId,
+        offset: r.offset,
+        level: r.level,
+        startOffset: r.startOffset,
+        actualEndTrack: r.actualEndTrack,
+        autoSettled: r.autoSettled
+      }));
+  }
+
+  generateNoteDebugList(): Array<{
+    noteId: string;
+    noteType: string;
+    level: string;
+    startOffset: number | undefined;
+    endOffset: number;
+    track: number;
+    endTrack: number | undefined;
+    actualEndTrack: number | undefined;
+    autoSettled: boolean | undefined;
+  }> {
+    return this.noteResults.map(r => ({
+      noteId: r.noteId,
+      noteType: r.noteType,
+      level: r.level,
+      startOffset: r.startOffset,
+      endOffset: r.offset,
+      track: r.track,
+      endTrack: r.endTrack,
+      actualEndTrack: r.actualEndTrack,
+      autoSettled: r.autoSettled
+    }));
   }
 
   generatePlaybackData(): PlaybackData {
@@ -219,6 +250,7 @@ export class ResultGenerator {
     const result = this.generateResult();
     const avgOffset = this.getAverageOffset();
     const offsetDist = this.getOffsetDistribution();
+    const debugList = this.generateNoteDebugList();
     const lines = [
       '=== 游戏结算报告 ===',
       '',
@@ -238,8 +270,27 @@ export class ResultGenerator {
       `准点: ${offsetDist.perfect}次`,
       `晚按: ${offsetDist.late}次`,
       '',
-      `Perfect 比率: ${(this.calculatePerfectRatio() * 100).toFixed(1)}%`
+      `Perfect 比率: ${(this.calculatePerfectRatio() * 100).toFixed(1)}%`,
+      '',
+      '--- 音符调试明细 ---'
     ];
+    for (const d of debugList) {
+      let line = `  ${d.noteId} [${d.noteType}] ${d.level}`;
+      if (d.startOffset !== undefined) {
+        line += ` 按下偏移:${d.startOffset.toFixed(0)}ms`;
+      }
+      line += ` 结束偏移:${d.endOffset.toFixed(0)}ms`;
+      if (d.endTrack !== undefined) {
+        line += ` 目标轨:${d.endTrack}`;
+      }
+      if (d.actualEndTrack !== undefined) {
+        line += ` 实际轨:${d.actualEndTrack}`;
+      }
+      if (d.autoSettled) {
+        line += ' [超时结算]';
+      }
+      lines.push(line);
+    }
     return lines.join('\n');
   }
 

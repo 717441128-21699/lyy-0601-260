@@ -345,7 +345,61 @@ export class RhythmSDK {
   exportPlaybackData(): PlaybackData {
     const recordedEvents = this.inputManager.getRecordedEvents();
     this.resultGenerator.setInputEvents(recordedEvents);
-    return this.resultGenerator.generatePlaybackData();
+    const data = this.resultGenerator.generatePlaybackData();
+    data.difficultyConfig = { ...this.difficultyConfig };
+    data.latency = this.timeline.getLatency();
+    data.practiceMode = this.practiceMode;
+    return data;
+  }
+
+  static replayPlaybackData(
+    playbackData: PlaybackData,
+    chart: ChartData,
+    callbacks?: Partial<EventCallbackMap>
+  ): GameResult {
+    const sdk = new RhythmSDK({
+      playbackMode: true,
+      playbackData,
+      difficulty: playbackData.difficultyConfig
+        ? {
+            judgeRanges: playbackData.difficultyConfig.judgeRanges,
+            scoreConfig: playbackData.difficultyConfig.scoreConfig,
+            noteSpeed: playbackData.difficultyConfig.noteSpeed,
+            trackCount: playbackData.difficultyConfig.trackCount
+          }
+        : undefined,
+      latency: playbackData.latency,
+      practiceMode: playbackData.practiceMode,
+      callbacks
+    });
+    sdk.loadChart(chart);
+    const judgeResults: JudgeResult[] = [];
+    if (!callbacks?.onNoteJudge) {
+      sdk.setCallbacks({
+        onNoteJudge: (r) => { judgeResults.push(r); }
+      });
+    }
+    sdk.initialize();
+    sdk.setPlaybackMode(true, playbackData);
+    let lastEventTime = 0;
+    for (const e of playbackData.inputEvents) {
+      if (e.time > lastEventTime) lastEventTime = e.time;
+    }
+    const simEnd = chart.duration + 3000;
+    const simDuration = Math.max(simEnd, lastEventTime + 1000);
+    let simTime = 0;
+    const step = 16;
+    while (simTime < simDuration) {
+      sdk.inputManager.updatePlayback(simTime);
+      const upcomingNotes = sdk.chartReader.getUpcomingNotes(simTime - 100, sdk.pendingNoteWindow);
+      sdk.judge.registerPendingNotes(upcomingNotes);
+      sdk.judge.update(simTime);
+      simTime += step;
+    }
+    sdk.judge.checkMissedNotes();
+    const result = sdk.getResult();
+    sdk.destroy();
+    return result;
   }
 
   getState(): GameState {

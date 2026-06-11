@@ -1,6 +1,3 @@
-/**
- * 音符类型枚举
- */
 export enum NoteType {
   TAP = 'tap',
   HOLD = 'hold',
@@ -8,9 +5,6 @@ export enum NoteType {
   SWIPE = 'swipe'
 }
 
-/**
- * 判定等级枚举
- */
 export enum JudgeLevel {
   PERFECT = 'perfect',
   GOOD = 'good',
@@ -18,9 +12,6 @@ export enum JudgeLevel {
   NONE = 'none'
 }
 
-/**
- * 游戏状态枚举
- */
 export enum GameState {
   IDLE = 'idle',
   PLAYING = 'playing',
@@ -28,18 +19,12 @@ export enum GameState {
   FINISHED = 'finished'
 }
 
-/**
- * 坐标点（用于滑动轨迹）
- */
 export interface Point {
   x: number;
   y: number;
   time: number;
 }
 
-/**
- * 单个音符定义
- */
 export interface Note {
   id: string;
   type: NoteType;
@@ -51,9 +36,6 @@ export interface Note {
   value?: number;
 }
 
-/**
- * 谱面数据
- */
 export interface ChartData {
   title: string;
   difficulty: string;
@@ -63,17 +45,11 @@ export interface ChartData {
   offset?: number;
 }
 
-/**
- * 判定区间配置（单位：毫秒）
- */
 export interface JudgeRanges {
   perfect: number;
   good: number;
 }
 
-/**
- * 输入事件
- */
 export interface InputEvent {
   id: number;
   type: 'touchstart' | 'touchmove' | 'touchend';
@@ -84,9 +60,6 @@ export interface InputEvent {
   track?: number;
 }
 
-/**
- * 判定结果
- */
 export interface JudgeResult {
   noteId: string;
   level: JudgeLevel;
@@ -95,11 +68,11 @@ export interface JudgeResult {
   noteType: NoteType;
   track: number;
   endTrack?: number;
+  startOffset?: number;
+  actualEndTrack?: number;
+  autoSettled?: boolean;
 }
 
-/**
- * 分数配置
- */
 export interface ScoreConfig {
   perfect: number;
   good: number;
@@ -107,18 +80,12 @@ export interface ScoreConfig {
   comboBonus: number;
 }
 
-/**
- * 判定统计
- */
 export interface JudgeStats {
   perfect: number;
   good: number;
   miss: number;
 }
 
-/**
- * 结算数据
- */
 export interface GameResult {
   score: number;
   maxCombo: number;
@@ -129,18 +96,15 @@ export interface GameResult {
   playbackData: PlaybackData;
 }
 
-/**
- * 回放数据
- */
 export interface PlaybackData {
   inputEvents: InputEvent[];
   judgeResults: JudgeResult[];
   chartNotes: Note[];
+  difficultyConfig?: DifficultyConfig;
+  latency?: number;
+  practiceMode?: boolean;
 }
 
-/**
- * 难度配置
- */
 export interface DifficultyConfig {
   judgeRanges: JudgeRanges;
   scoreConfig: ScoreConfig;
@@ -148,9 +112,6 @@ export interface DifficultyConfig {
   trackCount: number;
 }
 
-/**
- * 事件回调类型
- */
 export type EventCallbackMap = {
   onNoteJudge: (result: JudgeResult) => void;
   onComboChange: (combo: number, maxCombo: number) => void;
@@ -161,9 +122,6 @@ export type EventCallbackMap = {
   onHoldProgress: (noteId: string, progress: number) => void;
 };
 
-/**
- * SDK 配置选项
- */
 export interface SDKOptions {
   difficulty?: Partial<DifficultyConfig>;
   latency?: number;
@@ -174,12 +132,11 @@ export interface SDKOptions {
   callbacks?: Partial<EventCallbackMap>;
 }
 
-/**
- * 长按状态
- */
 export interface HoldState {
   noteId: string;
   startTime: number;
+  startOffset: number;
   isHolding: boolean;
   pointerId: number;
+  lastTrack: number;
 }

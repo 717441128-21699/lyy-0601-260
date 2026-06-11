@@ -84,8 +84,7 @@ export class Judge {
     } else if (event.type === 'touchend') {
       return this.handleReleaseInput(event);
     } else if (event.type === 'touchmove') {
-      this.handleHoldProgress(event);
-      this.handleSlideProgress(event);
+      this.handleMoveUpdate(event);
       return null;
     }
     return null;
@@ -106,8 +105,7 @@ export class Judge {
         return this.judgeTapNote(note, event);
       }
       if (note.type === NoteType.HOLD || note.type === NoteType.SLIDE) {
-        const result = this.startHoldNote(note, event);
-        if (result) return result;
+        this.startHoldNote(note, event);
       }
     }
     return null;
@@ -120,6 +118,7 @@ export class Judge {
     const result: Note[] = [];
     for (const [id, note] of this.pendingNotes) {
       if (this.judgedNotes.has(id)) continue;
+      if (this.holdStates.has(id)) continue;
       if (track !== undefined && note.track !== track) {
         if (note.type !== NoteType.SLIDE) continue;
         const endTrack = note.endTrack ?? note.track;
@@ -149,31 +148,36 @@ export class Judge {
     return result;
   }
 
-  private startHoldNote(note: Note, event: InputEvent): JudgeResult | null {
-    const offset = event.time - note.time;
-    const startLevel = this.getJudgeLevel(offset);
-    if (startLevel === JudgeLevel.MISS) {
-      const result: JudgeResult = {
-        noteId: note.id,
-        level: JudgeLevel.MISS,
-        offset,
-        time: event.time,
-        noteType: note.type,
-        track: note.track,
-        endTrack: note.type === NoteType.SLIDE ? note.endTrack : undefined
-      };
-      this.finalizeNote(note.id);
-      this.emitResult(result);
-      return result;
-    }
+  private startHoldNote(note: Note, event: InputEvent): void {
+    const startOffset = event.time - note.time;
+    const track = event.track ?? note.track;
     this.holdStates.set(note.id, {
       noteId: note.id,
       startTime: event.time,
+      startOffset,
       isHolding: true,
-      pointerId: event.pointerId
+      pointerId: event.pointerId,
+      lastTrack: track
     });
     this.pointerNoteMap.set(event.pointerId, note.id);
-    return null;
+  }
+
+  private handleMoveUpdate(event: InputEvent): void {
+    const noteId = this.pointerNoteMap.get(event.pointerId);
+    if (!noteId) return;
+    const holdState = this.holdStates.get(noteId);
+    if (holdState && event.track !== undefined) {
+      holdState.lastTrack = event.track;
+    }
+    const note = this.pendingNotes.get(noteId);
+    if (!note || !holdState) return;
+    const endTime = note.endTime || note.time;
+    const totalDuration = endTime - note.time;
+    const currentDuration = event.time - holdState.startTime;
+    const progress = Math.min(1, Math.max(0, currentDuration / totalDuration));
+    if (this.holdProgressCallback) {
+      this.holdProgressCallback(noteId, progress);
+    }
   }
 
   private handleReleaseInput(event: InputEvent): JudgeResult | null {
@@ -185,61 +189,36 @@ export class Judge {
       this.pointerNoteMap.delete(event.pointerId);
       return null;
     }
+    const actualEndTrack = event.track ?? holdState.lastTrack;
+    if (event.track !== undefined) {
+      holdState.lastTrack = event.track;
+    }
     if (note.type === NoteType.HOLD) {
-      return this.endHoldNote(note, event, holdState);
+      return this.endHoldNote(note, event, holdState, actualEndTrack, false);
     }
     if (note.type === NoteType.SLIDE) {
-      return this.endSlideNote(note, event, holdState);
+      return this.endSlideNote(note, event, holdState, actualEndTrack, false);
     }
     this.pointerNoteMap.delete(event.pointerId);
     this.holdStates.delete(noteId);
     return null;
   }
 
-  private endHoldNote(note: Note, event: InputEvent, holdState: HoldState): JudgeResult {
+  private endHoldNote(
+    note: Note,
+    event: InputEvent,
+    holdState: HoldState,
+    actualEndTrack: number,
+    autoSettled: boolean
+  ): JudgeResult {
     const endTime = note.endTime || note.time;
     const releaseOffset = event.time - endTime;
     const holdDuration = event.time - holdState.startTime;
     const totalDuration = endTime - note.time;
-    const holdRatio = Math.min(1, holdDuration / totalDuration);
+    const holdRatio = totalDuration > 0 ? Math.min(1, holdDuration / totalDuration) : 1;
+    const startLevel = this.getJudgeLevel(holdState.startOffset);
     let level: JudgeLevel;
-    if (holdRatio >= 0.95 && Math.abs(releaseOffset) <= this.judgeRanges.perfect) {
-      level = JudgeLevel.PERFECT;
-    } else if (holdRatio >= 0.8 && Math.abs(releaseOffset) <= this.judgeRanges.good) {
-      level = JudgeLevel.GOOD;
-    } else if (holdRatio >= 0.5) {
-      level = JudgeLevel.GOOD;
-    } else {
-      level = JudgeLevel.MISS;
-    }
-    if (this.practiceMode && level === JudgeLevel.MISS) {
-      level = JudgeLevel.GOOD;
-    }
-    const result: JudgeResult = {
-      noteId: note.id,
-      level,
-      offset: releaseOffset,
-      time: event.time,
-      noteType: note.type,
-      track: note.track
-    };
-    this.pointerNoteMap.delete(event.pointerId);
-    this.holdStates.delete(note.id);
-    this.finalizeNote(note.id);
-    this.emitResult(result);
-    return result;
-  }
-
-  private endSlideNote(note: Note, event: InputEvent, holdState: HoldState): JudgeResult {
-    const endTime = note.endTime || note.time;
-    const endTrack = note.endTrack ?? note.track;
-    const releaseOffset = event.time - endTime;
-    const trackMatch = event.track === endTrack;
-    const holdDuration = event.time - holdState.startTime;
-    const totalDuration = endTime - note.time;
-    const holdRatio = Math.min(1, holdDuration / totalDuration);
-    let level: JudgeLevel;
-    if (!trackMatch) {
+    if (startLevel === JudgeLevel.MISS) {
       level = JudgeLevel.MISS;
     } else if (holdRatio >= 0.95 && Math.abs(releaseOffset) <= this.judgeRanges.perfect) {
       level = JudgeLevel.PERFECT;
@@ -250,7 +229,7 @@ export class Judge {
     } else {
       level = JudgeLevel.MISS;
     }
-    if (this.practiceMode && level === JudgeLevel.MISS && holdRatio >= 0.5) {
+    if (this.practiceMode && level === JudgeLevel.MISS && startLevel !== JudgeLevel.MISS && holdRatio >= 0.5) {
       level = JudgeLevel.GOOD;
     }
     const result: JudgeResult = {
@@ -260,7 +239,9 @@ export class Judge {
       time: event.time,
       noteType: note.type,
       track: note.track,
-      endTrack
+      startOffset: holdState.startOffset,
+      actualEndTrack,
+      autoSettled
     };
     this.pointerNoteMap.delete(event.pointerId);
     this.holdStates.delete(note.id);
@@ -269,34 +250,57 @@ export class Judge {
     return result;
   }
 
-  private handleHoldProgress(event: InputEvent): void {
-    const noteId = this.pointerNoteMap.get(event.pointerId);
-    if (!noteId) return;
-    const note = this.pendingNotes.get(noteId);
-    const holdState = this.holdStates.get(noteId);
-    if (!note || !holdState || note.type !== NoteType.HOLD) return;
+  private endSlideNote(
+    note: Note,
+    event: InputEvent,
+    holdState: HoldState,
+    actualEndTrack: number,
+    autoSettled: boolean
+  ): JudgeResult {
     const endTime = note.endTime || note.time;
+    const endTrack = note.endTrack ?? note.track;
+    const releaseOffset = event.time - endTime;
+    const trackMatch = actualEndTrack === endTrack;
+    const holdDuration = event.time - holdState.startTime;
     const totalDuration = endTime - note.time;
-    const currentDuration = event.time - holdState.startTime;
-    const progress = Math.min(1, Math.max(0, currentDuration / totalDuration));
-    if (this.holdProgressCallback) {
-      this.holdProgressCallback(noteId, progress);
+    const holdRatio = totalDuration > 0 ? Math.min(1, holdDuration / totalDuration) : 1;
+    const startLevel = this.getJudgeLevel(holdState.startOffset);
+    let level: JudgeLevel;
+    if (!trackMatch) {
+      level = JudgeLevel.MISS;
+    } else if (startLevel === JudgeLevel.MISS) {
+      level = JudgeLevel.MISS;
+    } else if (holdRatio >= 0.95 && Math.abs(releaseOffset) <= this.judgeRanges.perfect) {
+      level = JudgeLevel.PERFECT;
+    } else if (holdRatio >= 0.8 && Math.abs(releaseOffset) <= this.judgeRanges.good) {
+      level = JudgeLevel.GOOD;
+    } else if (holdRatio >= 0.5) {
+      level = JudgeLevel.GOOD;
+    } else {
+      level = JudgeLevel.MISS;
     }
-  }
-
-  private handleSlideProgress(event: InputEvent): void {
-    const noteId = this.pointerNoteMap.get(event.pointerId);
-    if (!noteId) return;
-    const note = this.pendingNotes.get(noteId);
-    const holdState = this.holdStates.get(noteId);
-    if (!note || !holdState || note.type !== NoteType.SLIDE) return;
-    const endTime = note.endTime || note.time;
-    const totalDuration = endTime - note.time;
-    const currentDuration = event.time - holdState.startTime;
-    const progress = Math.min(1, Math.max(0, currentDuration / totalDuration));
-    if (this.holdProgressCallback) {
-      this.holdProgressCallback(noteId, progress);
+    if (level === JudgeLevel.MISS && !trackMatch) {
+      // no practice mode override for wrong track
+    } else if (this.practiceMode && level === JudgeLevel.MISS && startLevel !== JudgeLevel.MISS && trackMatch && holdRatio >= 0.5) {
+      level = JudgeLevel.GOOD;
     }
+    const result: JudgeResult = {
+      noteId: note.id,
+      level,
+      offset: releaseOffset,
+      time: event.time,
+      noteType: note.type,
+      track: note.track,
+      endTrack,
+      startOffset: holdState.startOffset,
+      actualEndTrack,
+      autoSettled
+    };
+    this.pointerNoteMap.delete(event.pointerId);
+    this.holdStates.delete(note.id);
+    this.finalizeNote(note.id);
+    this.emitResult(result);
+    return result;
   }
 
   checkMissedNotes(): Note[] {
@@ -322,7 +326,8 @@ export class Judge {
           time: currentTime,
           noteType: note.type,
           track: note.track,
-          endTrack: note.type === NoteType.SLIDE ? note.endTrack : undefined
+          endTrack: note.type === NoteType.SLIDE ? note.endTrack : undefined,
+          autoSettled: true
         };
         this.finalizeNote(id);
         this.emitResult(result);
@@ -340,29 +345,36 @@ export class Judge {
   }
 
   private checkAutoHoldCompletion(currentTime: number): void {
+    const toComplete: Array<{
+      noteId: string;
+      note: Note;
+      state: HoldState;
+    }> = [];
     for (const [noteId, state] of this.holdStates) {
       const note = this.pendingNotes.get(noteId);
       if (!note) continue;
       const endTime = note.endTime || note.time;
       if (currentTime > endTime + this.judgeRanges.good) {
         if (state.isHolding) {
-          if (note.type === NoteType.HOLD || note.type === NoteType.SLIDE) {
-            const fakeEvent: InputEvent = {
-              id: -1,
-              type: 'touchend',
-              x: 0,
-              y: 0,
-              time: currentTime,
-              pointerId: state.pointerId,
-              track: note.endTrack ?? note.track
-            };
-            if (note.type === NoteType.HOLD) {
-              this.endHoldNote(note, fakeEvent, state);
-            } else {
-              this.endSlideNote(note, fakeEvent, state);
-            }
-          }
+          toComplete.push({ noteId, note, state });
         }
+      }
+    }
+    for (const { note, state } of toComplete) {
+      const fakeEvent: InputEvent = {
+        id: -1,
+        type: 'touchend',
+        x: 0,
+        y: 0,
+        time: currentTime,
+        pointerId: state.pointerId,
+        track: state.lastTrack
+      };
+      const actualEndTrack = state.lastTrack;
+      if (note.type === NoteType.HOLD) {
+        this.endHoldNote(note, fakeEvent, state, actualEndTrack, true);
+      } else if (note.type === NoteType.SLIDE) {
+        this.endSlideNote(note, fakeEvent, state, actualEndTrack, true);
       }
     }
   }
