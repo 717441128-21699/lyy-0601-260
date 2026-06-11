@@ -19,6 +19,15 @@ export enum GameState {
   FINISHED = 'finished'
 }
 
+export type FailureCategory =
+  | 'wrong_track'
+  | 'path_incomplete'
+  | 'early_press'
+  | 'late_press'
+  | 'short_hold'
+  | 'timeout'
+  | 'no_input';
+
 export interface Point {
   x: number;
   y: number;
@@ -33,6 +42,7 @@ export interface Note {
   endTime?: number;
   endTrack?: number;
   slidePath?: Point[];
+  slideWaypoints?: number[];
   value?: number;
 }
 
@@ -71,6 +81,8 @@ export interface JudgeResult {
   startOffset?: number;
   actualEndTrack?: number;
   autoSettled?: boolean;
+  pathComplete?: boolean;
+  failureCategory?: FailureCategory;
 }
 
 export interface ScoreConfig {
@@ -139,4 +151,43 @@ export interface HoldState {
   isHolding: boolean;
   pointerId: number;
   lastTrack: number;
+  visitedTracks: number[];
+}
+
+export interface NoteDiscrepancy {
+  noteId: string;
+  originalLevel: JudgeLevel;
+  replayLevel: JudgeLevel;
+  originalOffset: number;
+  replayOffset: number;
+}
+
+export interface ReplayComparison {
+  scoreMatch: boolean;
+  originalScore: number;
+  replayScore: number;
+  maxComboMatch: boolean;
+  originalMaxCombo: number;
+  replayMaxCombo: number;
+  statsMatch: boolean;
+  originalStats: JudgeStats;
+  replayStats: JudgeStats;
+  noteDiscrepancies: NoteDiscrepancy[];
+  consistencyRate: number;
+}
+
+export interface ReplaySummary {
+  discrepancies: NoteDiscrepancy[];
+  inputTrajectorySummary: {
+    totalEvents: number;
+    touchStarts: number;
+    touchMoves: number;
+    touchEnds: number;
+    uniquePointers: number;
+    duration: number;
+  };
+  failureBreakdown: Record<FailureCategory, number>;
+  consistencyRate: number;
+  scoreMatch: boolean;
+  maxComboMatch: boolean;
 }

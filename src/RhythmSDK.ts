@@ -19,7 +19,11 @@ import {
   PlaybackData,
   JudgeRanges,
   ScoreConfig,
-  EventCallbackMap
+  EventCallbackMap,
+  ReplayComparison,
+  NoteDiscrepancy,
+  ReplaySummary,
+  FailureCategory
 } from './types';
 
 export class RhythmSDK {
@@ -132,6 +136,9 @@ export class RhythmSDK {
     this.applyDifficultyConfig();
     this.judge.setPracticeMode(this.practiceMode);
     this.comboCounter.setPracticeMode(this.practiceMode);
+    if (this.options.latency !== undefined) {
+      this.timeline.setLatency(this.options.latency);
+    }
     this.isInitialized = true;
   }
 
@@ -350,6 +357,111 @@ export class RhythmSDK {
     data.latency = this.timeline.getLatency();
     data.practiceMode = this.practiceMode;
     return data;
+  }
+
+  compareReplay(
+    originalResult: GameResult,
+    playbackData: PlaybackData,
+    chart: ChartData
+  ): ReplayComparison {
+    const replayResult = RhythmSDK.replayPlaybackData(playbackData, chart);
+    const originalMap = new Map<string, JudgeResult>();
+    for (const r of originalResult.noteResults) {
+      originalMap.set(r.noteId, r);
+    }
+    const replayMap = new Map<string, JudgeResult>();
+    for (const r of replayResult.noteResults) {
+      replayMap.set(r.noteId, r);
+    }
+    const allNoteIds = new Set([...originalMap.keys(), ...replayMap.keys()]);
+    const discrepancies: NoteDiscrepancy[] = [];
+    let consistentCount = 0;
+    for (const noteId of allNoteIds) {
+      const orig = originalMap.get(noteId);
+      const repl = replayMap.get(noteId);
+      if (!orig || !repl) {
+        discrepancies.push({
+          noteId,
+          originalLevel: orig?.level ?? JudgeLevel.MISS,
+          replayLevel: repl?.level ?? JudgeLevel.MISS,
+          originalOffset: orig?.offset ?? 0,
+          replayOffset: repl?.offset ?? 0
+        });
+        continue;
+      }
+      if (orig.level === repl.level) {
+        consistentCount++;
+      } else {
+        discrepancies.push({
+          noteId,
+          originalLevel: orig.level,
+          replayLevel: repl.level,
+          originalOffset: orig.offset,
+          replayOffset: repl.offset
+        });
+      }
+    }
+    const totalNotes = allNoteIds.size;
+    const consistencyRate = totalNotes > 0 ? Math.round((consistentCount / totalNotes) * 10000) / 100 : 100;
+    return {
+      scoreMatch: originalResult.score === replayResult.score,
+      originalScore: originalResult.score,
+      replayScore: replayResult.score,
+      maxComboMatch: originalResult.maxCombo === replayResult.maxCombo,
+      originalMaxCombo: originalResult.maxCombo,
+      replayMaxCombo: replayResult.maxCombo,
+      statsMatch: originalResult.stats.perfect === replayResult.stats.perfect
+        && originalResult.stats.good === replayResult.stats.good
+        && originalResult.stats.miss === replayResult.stats.miss,
+      originalStats: { ...originalResult.stats },
+      replayStats: { ...replayResult.stats },
+      noteDiscrepancies: discrepancies,
+      consistencyRate
+    };
+  }
+
+  generateReplaySummary(
+    originalResult: GameResult,
+    playbackData: PlaybackData,
+    chart: ChartData
+  ): ReplaySummary {
+    const comparison = this.compareReplay(originalResult, playbackData, chart);
+    const inputEvents = playbackData.inputEvents;
+    const touchStarts = inputEvents.filter(e => e.type === 'touchstart').length;
+    const touchMoves = inputEvents.filter(e => e.type === 'touchmove').length;
+    const touchEnds = inputEvents.filter(e => e.type === 'touchend').length;
+    const pointerSet = new Set(inputEvents.map(e => e.pointerId));
+    const times = inputEvents.map(e => e.time);
+    const duration = times.length > 0 ? Math.max(...times) - Math.min(...times) : 0;
+    const failureBreakdown: Record<FailureCategory, number> = {
+      wrong_track: 0,
+      path_incomplete: 0,
+      early_press: 0,
+      late_press: 0,
+      short_hold: 0,
+      timeout: 0,
+      no_input: 0
+    };
+    for (const r of originalResult.noteResults) {
+      if (r.level === JudgeLevel.MISS && r.failureCategory) {
+        failureBreakdown[r.failureCategory]++;
+      }
+    }
+    return {
+      discrepancies: comparison.noteDiscrepancies,
+      inputTrajectorySummary: {
+        totalEvents: inputEvents.length,
+        touchStarts,
+        touchMoves,
+        touchEnds,
+        uniquePointers: pointerSet.size,
+        duration: Math.round(duration)
+      },
+      failureBreakdown,
+      consistencyRate: comparison.consistencyRate,
+      scoreMatch: comparison.scoreMatch,
+      maxComboMatch: comparison.maxComboMatch
+    };
   }
 
   static replayPlaybackData(

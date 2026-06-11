@@ -5,7 +5,11 @@ import {
   PlaybackData,
   Note,
   InputEvent,
-  JudgeLevel
+  JudgeLevel,
+  ReplayComparison,
+  ReplaySummary,
+  NoteDiscrepancy,
+  FailureCategory
 } from '../types';
 
 export interface GradeThreshold {
@@ -296,6 +300,61 @@ export class ResultGenerator {
 
   exportResultToJSON(): string {
     return JSON.stringify(this.generateResult(), null, 2);
+  }
+
+  generateReplayComparisonReport(comparison: ReplayComparison): string {
+    const lines = [
+      '=== 回放对比报告 ===',
+      '',
+      `分数: ${comparison.originalScore} (原局) vs ${comparison.replayScore} (回放) ${comparison.scoreMatch ? '✓' : '✗'}`,
+      `最大连击: ${comparison.originalMaxCombo} vs ${comparison.replayMaxCombo} ${comparison.maxComboMatch ? '✓' : '✗'}`,
+      `判定统计: P ${comparison.originalStats.perfect}/${comparison.replayStats.perfect} G ${comparison.originalStats.good}/${comparison.replayStats.good} M ${comparison.originalStats.miss}/${comparison.replayStats.miss} ${comparison.statsMatch ? '✓' : '✗'}`,
+      `一致率: ${comparison.consistencyRate}%`,
+    ];
+    if (comparison.noteDiscrepancies.length > 0) {
+      lines.push('', '--- 不一致音符 ---');
+      for (const d of comparison.noteDiscrepancies) {
+        lines.push(`  ${d.noteId}: ${d.originalLevel}(${d.originalOffset.toFixed(0)}ms) → ${d.replayLevel}(${d.replayOffset.toFixed(0)}ms)`);
+      }
+    } else {
+      lines.push('', '所有音符判定完全一致 ✓');
+    }
+    return lines.join('\n');
+  }
+
+  generateReplaySummaryReport(summary: ReplaySummary): string {
+    const lines = [
+      '=== 复盘摘要 ===',
+      '',
+      `一致率: ${summary.consistencyRate}%`,
+      `分数一致: ${summary.scoreMatch ? '是' : '否'}`,
+      `最大连击一致: ${summary.maxComboMatch ? '是' : '否'}`,
+      '',
+      '--- 输入轨迹摘要 ---',
+      `总事件: ${summary.inputTrajectorySummary.totalEvents}`,
+      `按下/移动/抬起: ${summary.inputTrajectorySummary.touchStarts}/${summary.inputTrajectorySummary.touchMoves}/${summary.inputTrajectorySummary.touchEnds}`,
+      `独立手指: ${summary.inputTrajectorySummary.uniquePointers}`,
+      `输入时长: ${summary.inputTrajectorySummary.duration}ms`,
+      '',
+      '--- 失败原因分类 ---',
+    ];
+    const fb = summary.failureBreakdown;
+    if (fb.wrong_track > 0) lines.push(`  轨道错误(wrong_track): ${fb.wrong_track}`);
+    if (fb.path_incomplete > 0) lines.push(`  路径不完整(path_incomplete): ${fb.path_incomplete}`);
+    if (fb.early_press > 0) lines.push(`  按早(early_press): ${fb.early_press}`);
+    if (fb.late_press > 0) lines.push(`  按晚(late_press): ${fb.late_press}`);
+    if (fb.short_hold > 0) lines.push(`  保持不足(short_hold): ${fb.short_hold}`);
+    if (fb.timeout > 0) lines.push(`  超时(timeout): ${fb.timeout}`);
+    if (fb.no_input > 0) lines.push(`  未输入(no_input): ${fb.no_input}`);
+    const totalMiss = Object.values(fb).reduce((a, b) => a + b, 0);
+    if (totalMiss === 0) lines.push('  (无 Miss)');
+    if (summary.discrepancies.length > 0) {
+      lines.push('', '--- 不一致音符列表 ---');
+      for (const d of summary.discrepancies) {
+        lines.push(`  ${d.noteId}: ${d.originalLevel}→${d.replayLevel}`);
+      }
+    }
+    return lines.join('\n');
   }
 
   reset(): void {
