@@ -1,0 +1,26 @@
+{
+  "name": "rhythm-game-sdk",
+  "version": "1.0.0",
+  "description": "Music rhythm game scoring SDK for touch-based beat judgment",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "test": "ts-node examples/basic-demo.ts",
+    "dev": "tsc --watch"
+  },
+  "keywords": [
+    "rhythm",
+    "game",
+    "sdk",
+    "music",
+    "scoring"
+  ],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "typescript": "^5.3.0",
+    "ts-node": "^10.9.0",
+    "@types/node": "^20.10.0"
+  }
+}
