@@ -94,6 +94,7 @@ export interface JudgeResult {
   time: number;
   noteType: NoteType;
   track: number;
+  endTrack?: number;
 }
 
 /**

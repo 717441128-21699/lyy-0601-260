@@ -141,38 +141,45 @@ export class RhythmSDK {
     this.judge.setTimeProvider(getTime);
   }
 
-  private setupCallbacks(): void {
-    const cbs = this.options.callbacks || {};
+  private getCallbacks(): Partial<EventCallbackMap> {
+    return this.options.callbacks || {};
+  }
 
+  private setupCallbacks(): void {
     this.judge.setJudgeResultCallback((result) => {
       this.comboCounter.processJudge(result.level);
       this.resultGenerator.addJudgeResult(result);
-      if (cbs.onNoteJudge) {
-        try { cbs.onNoteJudge(result); } catch (e) { console.error(e); }
+      const cb = this.getCallbacks().onNoteJudge;
+      if (cb) {
+        try { cb(result); } catch (e) { console.error(e); }
       }
     });
 
     this.judge.setNoteMissCallback((note) => {
-      if (cbs.onNoteMiss) {
-        try { cbs.onNoteMiss(note); } catch (e) { console.error(e); }
+      const cb = this.getCallbacks().onNoteMiss;
+      if (cb) {
+        try { cb(note); } catch (e) { console.error(e); }
       }
     });
 
     this.judge.setHoldProgressCallback((noteId, progress) => {
-      if (cbs.onHoldProgress) {
-        try { cbs.onHoldProgress(noteId, progress); } catch (e) { console.error(e); }
+      const cb = this.getCallbacks().onHoldProgress;
+      if (cb) {
+        try { cb(noteId, progress); } catch (e) { console.error(e); }
       }
     });
 
     this.comboCounter.setComboChangeCallback((combo, maxCombo) => {
-      if (cbs.onComboChange) {
-        try { cbs.onComboChange(combo, maxCombo); } catch (e) { console.error(e); }
+      const cb = this.getCallbacks().onComboChange;
+      if (cb) {
+        try { cb(combo, maxCombo); } catch (e) { console.error(e); }
       }
     });
 
     this.comboCounter.setScoreChangeCallback((score) => {
-      if (cbs.onScoreChange) {
-        try { cbs.onScoreChange(score); } catch (e) { console.error(e); }
+      const cb = this.getCallbacks().onScoreChange;
+      if (cb) {
+        try { cb(score); } catch (e) { console.error(e); }
       }
     });
 
@@ -180,8 +187,9 @@ export class RhythmSDK {
       if (state === GameState.FINISHED && prev === GameState.PLAYING) {
         this.handleGameFinish();
       }
-      if (cbs.onStateChange) {
-        try { cbs.onStateChange(state, prev); } catch (e) { console.error(e); }
+      const cb = this.getCallbacks().onStateChange;
+      if (cb) {
+        try { cb(state, prev); } catch (e) { console.error(e); }
       }
     });
 
@@ -300,12 +308,6 @@ export class RhythmSDK {
 
   private handleGameFinish(): void {
     this.judge.checkMissedNotes();
-    const allNotes = this.chartReader.getNotes();
-    const totalNotes = allNotes.length;
-    const judgedCount = this.judge.getJudgedNoteCount();
-    if (judgedCount < totalNotes) {
-      // Force judge remaining
-    }
     const recordedEvents = this.inputManager.getRecordedEvents();
     this.resultGenerator.setInputEvents(recordedEvents);
 
@@ -314,9 +316,10 @@ export class RhythmSDK {
       this.difficultyConfig.scoreConfig.good,
       this.difficultyConfig.scoreConfig.comboBonus
     );
-    if (this.options.callbacks?.onGameFinish) {
+    const cb = this.getCallbacks().onGameFinish;
+    if (cb) {
       try {
-        this.options.callbacks.onGameFinish(result);
+        cb(result);
       } catch (e) {
         console.error(e);
       }

@@ -5,8 +5,9 @@ export class ChartReader {
   private sortedNotes: Note[] = [];
 
   loadChart(data: ChartData): void {
-    this.chart = JSON.parse(JSON.stringify(data));
-    this.sortedNotes = [...this.chart.notes].sort((a, b) => a.time - b.time);
+    const cloned: ChartData = JSON.parse(JSON.stringify(data));
+    this.chart = cloned;
+    this.sortedNotes = [...cloned.notes].sort((a, b) => a.time - b.time);
     this.validateChart();
   }
 
