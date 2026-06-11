@@ -22,6 +22,9 @@ export enum GameState {
 export type FailureCategory =
   | 'wrong_track'
   | 'path_incomplete'
+  | 'path_out_of_order'
+  | 'path_early'
+  | 'path_late'
   | 'early_press'
   | 'late_press'
   | 'short_hold'
@@ -34,6 +37,14 @@ export interface Point {
   time: number;
 }
 
+export interface SlideWaypoint {
+  track: number;
+  minTime?: number;
+  maxTime?: number;
+  minProgress?: number;
+  maxProgress?: number;
+}
+
 export interface Note {
   id: string;
   type: NoteType;
@@ -42,7 +53,7 @@ export interface Note {
   endTime?: number;
   endTrack?: number;
   slidePath?: Point[];
-  slideWaypoints?: number[];
+  slideWaypoints?: number[] | SlideWaypoint[];
   value?: number;
 }
 
@@ -83,6 +94,12 @@ export interface JudgeResult {
   autoSettled?: boolean;
   pathComplete?: boolean;
   failureCategory?: FailureCategory;
+  pathFailureDetail?: {
+    waypointIndex: number;
+    expectedTrack: number;
+    actualTrack?: number;
+    reason: 'missing' | 'out_of_order' | 'early' | 'late';
+  };
 }
 
 export interface ScoreConfig {
@@ -115,6 +132,8 @@ export interface PlaybackData {
   difficultyConfig?: DifficultyConfig;
   latency?: number;
   practiceMode?: boolean;
+  runId?: string;
+  chartTitle?: string;
 }
 
 export interface DifficultyConfig {
@@ -142,6 +161,7 @@ export interface SDKOptions {
   playbackMode?: boolean;
   playbackData?: PlaybackData;
   callbacks?: Partial<EventCallbackMap>;
+  pendingNoteWindow?: number;
 }
 
 export interface HoldState {
@@ -152,6 +172,7 @@ export interface HoldState {
   pointerId: number;
   lastTrack: number;
   visitedTracks: number[];
+  trackVisitTimes: Array<{ track: number; time: number }>;
 }
 
 export interface NoteDiscrepancy {
@@ -190,4 +211,27 @@ export interface ReplaySummary {
   consistencyRate: number;
   scoreMatch: boolean;
   maxComboMatch: boolean;
+}
+
+export interface BatchReplayResult {
+  totalRuns: number;
+  passedRuns: number;
+  failedRuns: number;
+  passRate: number;
+  perRunResults: Array<{
+    runId: string;
+    chartTitle: string;
+    passed: boolean;
+    score: number;
+    accuracy: number;
+    grade: string;
+    consistencyRate: number;
+    failures: string[];
+    summary: ReplaySummary;
+    comparison: ReplayComparison;
+  }>;
+  failureCategories: Record<FailureCategory, number>;
+  generatedAt: string;
+  totalNotes: number;
+  totalConsistencyRate: number;
 }

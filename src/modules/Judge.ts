@@ -7,12 +7,24 @@ import {
   InputEvent,
   Point,
   HoldState,
-  FailureCategory
+  FailureCategory,
+  SlideWaypoint
 } from '../types';
 
 export type JudgeResultCallback = (result: JudgeResult) => void;
 export type NoteMissCallback = (note: Note) => void;
 export type HoldProgressCallback = (noteId: string, progress: number) => void;
+
+interface PathCheckResult {
+  complete: boolean;
+  failureCategory?: FailureCategory;
+  failureDetail?: {
+    waypointIndex: number;
+    expectedTrack: number;
+    actualTrack?: number;
+    reason: 'missing' | 'out_of_order' | 'early' | 'late';
+  };
+}
 
 export class Judge {
   private judgeRanges: JudgeRanges;
@@ -95,9 +107,26 @@ export class Judge {
     const candidates = this.getCandidateNotes(event);
     if (candidates.length === 0) return null;
     candidates.sort((a, b) => {
-      const aOffset = Math.abs(event.time - a.time);
-      const bOffset = Math.abs(event.time - b.time);
-      return aOffset - bOffset;
+      const aIsHold = a.type === NoteType.HOLD || a.type === NoteType.SLIDE;
+      const bIsHold = b.type === NoteType.HOLD || b.type === NoteType.SLIDE;
+      const aOffset = event.time - a.time;
+      const bOffset = event.time - b.time;
+      if (aIsHold && bIsHold) {
+        const aPast = aOffset > 0;
+        const bPast = bOffset > 0;
+        if (aPast !== bPast) return aPast ? -1 : 1;
+        if (aPast) {
+          return aOffset - bOffset;
+        } else {
+          const aAbs = Math.abs(aOffset);
+          const bAbs = Math.abs(bOffset);
+          if (aAbs <= this.judgeRanges.good * 4 || bAbs <= this.judgeRanges.good * 4) {
+            return aAbs - bAbs;
+          }
+          return aOffset - bOffset;
+        }
+      }
+      return Math.abs(aOffset) - Math.abs(bOffset);
     });
     for (const note of candidates) {
       if (this.pointerNoteMap.has(event.pointerId)) continue;
@@ -107,6 +136,7 @@ export class Judge {
       }
       if (note.type === NoteType.HOLD || note.type === NoteType.SLIDE) {
         this.startHoldNote(note, event);
+        return null;
       }
     }
     return null;
@@ -115,7 +145,8 @@ export class Judge {
   private getCandidateNotes(event: InputEvent): Note[] {
     const currentTime = event.time;
     const track = event.track;
-    const maxWindow = this.judgeRanges.good * 4;
+    const holdWindow = this.judgeRanges.good * 20;
+    const tapWindow = this.judgeRanges.good * 2;
     const result: Note[] = [];
     for (const [id, note] of this.pendingNotes) {
       if (this.judgedNotes.has(id)) continue;
@@ -125,16 +156,18 @@ export class Judge {
         const endTrack = note.endTrack ?? note.track;
         if (note.track !== track && endTrack !== track) {
           const waypoints = note.slideWaypoints;
-          if (!waypoints || !waypoints.includes(track)) continue;
+          if (!waypoints) continue;
+          const trackList = waypoints.map(w => typeof w === 'number' ? w : w.track);
+          if (!trackList.includes(track)) continue;
         }
       }
       const timeDiff = Math.abs(currentTime - note.time);
       if (note.type === NoteType.HOLD || note.type === NoteType.SLIDE) {
-        if (timeDiff <= maxWindow) {
+        if (timeDiff <= holdWindow) {
           result.push(note);
         }
       } else {
-        if (timeDiff <= this.judgeRanges.good * 2) {
+        if (timeDiff <= tapWindow) {
           result.push(note);
         }
       }
@@ -164,12 +197,7 @@ export class Judge {
     const startOffset = event.time - note.time;
     const track = event.track ?? note.track;
     const visitedTracks = [track];
-    if (note.type === NoteType.SLIDE) {
-      const waypoints = note.slideWaypoints;
-      if (waypoints && waypoints.length > 0 && waypoints[0] === track) {
-        // starting track matches first waypoint
-      }
-    }
+    const trackVisitTimes = [{ track, time: event.time }];
     this.holdStates.set(note.id, {
       noteId: note.id,
       startTime: event.time,
@@ -177,7 +205,8 @@ export class Judge {
       isHolding: true,
       pointerId: event.pointerId,
       lastTrack: track,
-      visitedTracks
+      visitedTracks,
+      trackVisitTimes
     });
     this.pointerNoteMap.set(event.pointerId, note.id);
   }
@@ -191,6 +220,7 @@ export class Judge {
       const lastVisited = holdState.visitedTracks[holdState.visitedTracks.length - 1];
       if (lastVisited !== event.track) {
         holdState.visitedTracks.push(event.track);
+        holdState.trackVisitTimes.push({ track: event.track, time: event.time });
       }
     }
     const note = this.pendingNotes.get(noteId);
@@ -204,18 +234,147 @@ export class Judge {
     }
   }
 
-  private checkPathComplete(note: Note, visitedTracks: number[]): boolean {
-    const waypoints = note.slideWaypoints;
-    if (!waypoints || waypoints.length === 0) {
-      return true;
-    }
+  private normalizeWaypoints(waypoints: Array<number | SlideWaypoint> | undefined): SlideWaypoint[] | null {
+    if (!waypoints || waypoints.length === 0) return null;
+    return waypoints.map(w => typeof w === 'number' ? { track: w } : w);
+  }
+
+  private checkPathComplete(note: Note, visitedTracks: number[]): PathCheckResult {
+    const waypoints = this.normalizeWaypoints(note.slideWaypoints);
+    if (!waypoints) return { complete: true };
+    const result: PathCheckResult = { complete: false };
     let wpIdx = 0;
-    for (const t of visitedTracks) {
-      if (wpIdx < waypoints.length && t === waypoints[wpIdx]) {
+    let maxJVisited = -1;
+    for (let i = 0; i < visitedTracks.length && wpIdx < waypoints.length; i++) {
+      const t = visitedTracks[i];
+      if (t === waypoints[wpIdx].track) {
+        if (maxJVisited > wpIdx) {
+          result.failureCategory = 'path_out_of_order';
+          result.failureDetail = {
+            waypointIndex: wpIdx,
+            expectedTrack: waypoints[wpIdx].track,
+            actualTrack: t,
+            reason: 'out_of_order'
+          };
+          return result;
+        }
         wpIdx++;
+      } else {
+        for (let j = 0; j < waypoints.length; j++) {
+          if (t === waypoints[j].track) {
+            if (j < wpIdx) {
+              result.failureCategory = 'path_out_of_order';
+              result.failureDetail = {
+                waypointIndex: j,
+                expectedTrack: waypoints[j].track,
+                actualTrack: t,
+                reason: 'out_of_order'
+              };
+              return result;
+            }
+            if (j > wpIdx) {
+              maxJVisited = Math.max(maxJVisited, j);
+            }
+          }
+        }
       }
     }
-    return wpIdx >= waypoints.length;
+    if (wpIdx >= waypoints.length) {
+      result.complete = true;
+      return result;
+    }
+    if (maxJVisited > wpIdx) {
+      result.failureCategory = 'path_incomplete';
+      result.failureDetail = {
+        waypointIndex: wpIdx,
+        expectedTrack: waypoints[wpIdx].track,
+        actualTrack: waypoints[maxJVisited].track,
+        reason: 'missing'
+      };
+      return result;
+    }
+    result.failureCategory = 'path_incomplete';
+    result.failureDetail = {
+      waypointIndex: wpIdx,
+      expectedTrack: waypoints[wpIdx].track,
+      reason: 'missing'
+    };
+    return result;
+  }
+
+  private checkPathCompleteWithTiming(
+    note: Note,
+    trackVisitTimes: Array<{ track: number; time: number }>
+  ): PathCheckResult {
+    const waypoints = this.normalizeWaypoints(note.slideWaypoints);
+    if (!waypoints) return { complete: true };
+    const endTime = note.endTime || note.time;
+    const totalDuration = endTime - note.time;
+    const orderResult = this.checkPathComplete(note, trackVisitTimes.map(t => t.track));
+    if (!orderResult.complete && orderResult.failureCategory !== 'path_incomplete') {
+      return orderResult;
+    }
+    let wpIdx = 0;
+    for (const visit of trackVisitTimes) {
+      if (wpIdx >= waypoints.length) break;
+      if (visit.track !== waypoints[wpIdx].track) continue;
+      const wp = waypoints[wpIdx];
+      const visitOffset = visit.time - note.time;
+      const progress = totalDuration > 0 ? visitOffset / totalDuration : 0;
+      if (wp.minTime !== undefined && visitOffset < wp.minTime) {
+        return {
+          complete: false,
+          failureCategory: 'path_early',
+          failureDetail: {
+            waypointIndex: wpIdx,
+            expectedTrack: wp.track,
+            actualTrack: visit.track,
+            reason: 'early'
+          }
+        };
+      }
+      if (wp.maxTime !== undefined && visitOffset > wp.maxTime) {
+        return {
+          complete: false,
+          failureCategory: 'path_late',
+          failureDetail: {
+            waypointIndex: wpIdx,
+            expectedTrack: wp.track,
+            actualTrack: visit.track,
+            reason: 'late'
+          }
+        };
+      }
+      if (wp.minProgress !== undefined && progress < wp.minProgress) {
+        return {
+          complete: false,
+          failureCategory: 'path_early',
+          failureDetail: {
+            waypointIndex: wpIdx,
+            expectedTrack: wp.track,
+            actualTrack: visit.track,
+            reason: 'early'
+          }
+        };
+      }
+      if (wp.maxProgress !== undefined && progress > wp.maxProgress) {
+        return {
+          complete: false,
+          failureCategory: 'path_late',
+          failureDetail: {
+            waypointIndex: wpIdx,
+            expectedTrack: wp.track,
+            actualTrack: visit.track,
+            reason: 'late'
+          }
+        };
+      }
+      wpIdx++;
+    }
+    if (wpIdx >= waypoints.length) {
+      return { complete: true };
+    }
+    return orderResult;
   }
 
   private handleReleaseInput(event: InputEvent): JudgeResult | null {
@@ -233,6 +392,7 @@ export class Judge {
       const lastVisited = holdState.visitedTracks[holdState.visitedTracks.length - 1];
       if (lastVisited !== event.track) {
         holdState.visitedTracks.push(event.track);
+        holdState.trackVisitTimes.push({ track: event.track, time: event.time });
       }
     }
     if (note.type === NoteType.HOLD) {
@@ -268,7 +428,7 @@ export class Judge {
 
   private categorizeSlideFailure(
     trackMatch: boolean,
-    pathComplete: boolean,
+    pathCheck: PathCheckResult,
     startLevel: JudgeLevel,
     holdRatio: number,
     autoSettled: boolean,
@@ -276,7 +436,7 @@ export class Judge {
   ): FailureCategory {
     if (autoSettled) return 'timeout';
     if (!trackMatch) return 'wrong_track';
-    if (!pathComplete) return 'path_incomplete';
+    if (pathCheck.failureCategory) return pathCheck.failureCategory;
     if (startLevel === JudgeLevel.MISS) {
       return startOffset < 0 ? 'early_press' : 'late_press';
     }
@@ -349,11 +509,11 @@ export class Judge {
     const totalDuration = endTime - note.time;
     const holdRatio = totalDuration > 0 ? Math.min(1, holdDuration / totalDuration) : 1;
     const startLevel = this.getJudgeLevel(holdState.startOffset);
-    const pathComplete = this.checkPathComplete(note, holdState.visitedTracks);
+    const pathCheck = this.checkPathCompleteWithTiming(note, holdState.trackVisitTimes);
     let level: JudgeLevel;
     if (!trackMatch) {
       level = JudgeLevel.MISS;
-    } else if (!pathComplete) {
+    } else if (!pathCheck.complete) {
       level = JudgeLevel.MISS;
     } else if (startLevel === JudgeLevel.MISS) {
       level = JudgeLevel.MISS;
@@ -366,13 +526,12 @@ export class Judge {
     } else {
       level = JudgeLevel.MISS;
     }
-    if (level === JudgeLevel.MISS && (!trackMatch || !pathComplete)) {
-      // no practice mode override for wrong track or incomplete path
-    } else if (this.practiceMode && level === JudgeLevel.MISS && startLevel !== JudgeLevel.MISS && trackMatch && pathComplete && holdRatio >= 0.5) {
+    if (level === JudgeLevel.MISS && (!trackMatch || !pathCheck.complete)) {
+    } else if (this.practiceMode && level === JudgeLevel.MISS && startLevel !== JudgeLevel.MISS && trackMatch && pathCheck.complete && holdRatio >= 0.5) {
       level = JudgeLevel.GOOD;
     }
     const failureCategory = level === JudgeLevel.MISS
-      ? this.categorizeSlideFailure(trackMatch, pathComplete, startLevel, holdRatio, autoSettled, holdState.startOffset)
+      ? this.categorizeSlideFailure(trackMatch, pathCheck, startLevel, holdRatio, autoSettled, holdState.startOffset)
       : undefined;
     const result: JudgeResult = {
       noteId: note.id,
@@ -385,8 +544,9 @@ export class Judge {
       startOffset: holdState.startOffset,
       actualEndTrack,
       autoSettled,
-      pathComplete,
-      failureCategory
+      pathComplete: pathCheck.complete,
+      failureCategory,
+      pathFailureDetail: pathCheck.failureDetail
     };
     this.pointerNoteMap.delete(event.pointerId);
     this.holdStates.delete(note.id);
@@ -395,8 +555,8 @@ export class Judge {
     return result;
   }
 
-  checkMissedNotes(): Note[] {
-    const currentTime = this.getCurrentTime();
+  checkMissedNotes(currentTime?: number): Note[] {
+    const time = currentTime ?? this.getCurrentTime();
     const missWindow = this.judgeRanges.good;
     const missed: Note[] = [];
     for (const [id, note] of this.pendingNotes) {
@@ -409,14 +569,14 @@ export class Judge {
       } else {
         missThreshold = note.time + missWindow;
       }
-      if (currentTime > missThreshold) {
+      if (time > missThreshold) {
         missed.push(note);
         const failureCategory: FailureCategory = 'no_input';
         const result: JudgeResult = {
           noteId: id,
           level: JudgeLevel.MISS,
-          offset: currentTime - note.time,
-          time: currentTime,
+          offset: time - note.time,
+          time: time,
           noteType: note.type,
           track: note.track,
           endTrack: note.type === NoteType.SLIDE ? note.endTrack : undefined,
@@ -434,7 +594,7 @@ export class Judge {
   }
 
   update(currentTime: number): void {
-    this.checkMissedNotes();
+    this.checkMissedNotes(currentTime);
     this.checkAutoHoldCompletion(currentTime);
   }
 

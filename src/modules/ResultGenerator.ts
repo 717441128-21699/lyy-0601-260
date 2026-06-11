@@ -206,18 +206,31 @@ export class ResultGenerator {
     endTrack: number | undefined;
     actualEndTrack: number | undefined;
     autoSettled: boolean | undefined;
+    pathComplete: boolean | undefined;
+    failureCategory: string | undefined;
+    pathFailureDetail: string | undefined;
   }> {
-    return this.noteResults.map(r => ({
-      noteId: r.noteId,
-      noteType: r.noteType,
-      level: r.level,
-      startOffset: r.startOffset,
-      endOffset: r.offset,
-      track: r.track,
-      endTrack: r.endTrack,
-      actualEndTrack: r.actualEndTrack,
-      autoSettled: r.autoSettled
-    }));
+    return this.noteResults.map(r => {
+      let pathDetail: string | undefined;
+      if (r.pathFailureDetail) {
+        const d = r.pathFailureDetail;
+        pathDetail = `waypoint[${d.waypointIndex}] expected=${d.expectedTrack} actual=${d.actualTrack ?? '?'} reason=${d.reason}`;
+      }
+      return {
+        noteId: r.noteId,
+        noteType: r.noteType,
+        level: r.level,
+        startOffset: r.startOffset,
+        endOffset: r.offset,
+        track: r.track,
+        endTrack: r.endTrack,
+        actualEndTrack: r.actualEndTrack,
+        autoSettled: r.autoSettled,
+        pathComplete: r.pathComplete,
+        failureCategory: r.failureCategory,
+        pathFailureDetail: pathDetail
+      };
+    });
   }
 
   generatePlaybackData(): PlaybackData {
@@ -290,6 +303,12 @@ export class ResultGenerator {
       if (d.actualEndTrack !== undefined) {
         line += ` 实际轨:${d.actualEndTrack}`;
       }
+      if (d.failureCategory) {
+        line += ` 失败:${d.failureCategory}`;
+      }
+      if (d.pathFailureDetail) {
+        line += ` 路径:${d.pathFailureDetail}`;
+      }
       if (d.autoSettled) {
         line += ' [超时结算]';
       }
@@ -341,6 +360,9 @@ export class ResultGenerator {
     const fb = summary.failureBreakdown;
     if (fb.wrong_track > 0) lines.push(`  轨道错误(wrong_track): ${fb.wrong_track}`);
     if (fb.path_incomplete > 0) lines.push(`  路径不完整(path_incomplete): ${fb.path_incomplete}`);
+    if (fb.path_out_of_order > 0) lines.push(`  路径顺序错(path_out_of_order): ${fb.path_out_of_order}`);
+    if (fb.path_early > 0) lines.push(`  路径经过太早(path_early): ${fb.path_early}`);
+    if (fb.path_late > 0) lines.push(`  路径经过太晚(path_late): ${fb.path_late}`);
     if (fb.early_press > 0) lines.push(`  按早(early_press): ${fb.early_press}`);
     if (fb.late_press > 0) lines.push(`  按晚(late_press): ${fb.late_press}`);
     if (fb.short_hold > 0) lines.push(`  保持不足(short_hold): ${fb.short_hold}`);

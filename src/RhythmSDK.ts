@@ -23,7 +23,9 @@ import {
   ReplayComparison,
   NoteDiscrepancy,
   ReplaySummary,
-  FailureCategory
+  FailureCategory,
+  BatchReplayResult,
+  SlideWaypoint
 } from './types';
 
 export class RhythmSDK {
@@ -49,6 +51,7 @@ export class RhythmSDK {
     this.autoPlayMode = options.autoPlay ?? false;
     this.practiceMode = options.practiceMode ?? false;
     this.playbackMode = options.playbackMode ?? false;
+    this.pendingNoteWindow = options.pendingNoteWindow ?? 3000;
 
     this.chartReader = new ChartReader();
     this.timeline = new Timeline();
@@ -356,6 +359,10 @@ export class RhythmSDK {
     data.difficultyConfig = { ...this.difficultyConfig };
     data.latency = this.timeline.getLatency();
     data.practiceMode = this.practiceMode;
+    const chart = this.chartReader.getChart();
+    if (chart) {
+      data.chartTitle = chart.title;
+    }
     return data;
   }
 
@@ -436,6 +443,9 @@ export class RhythmSDK {
     const failureBreakdown: Record<FailureCategory, number> = {
       wrong_track: 0,
       path_incomplete: 0,
+      path_out_of_order: 0,
+      path_early: 0,
+      path_late: 0,
       early_press: 0,
       late_press: 0,
       short_hold: 0,
@@ -462,6 +472,193 @@ export class RhythmSDK {
       scoreMatch: comparison.scoreMatch,
       maxComboMatch: comparison.maxComboMatch
     };
+  }
+
+  generateReplaySummaryJSON(
+    originalResult: GameResult,
+    playbackData: PlaybackData,
+    chart: ChartData
+  ): string {
+    const summary = this.generateReplaySummary(originalResult, playbackData, chart);
+    const comparison = this.compareReplay(originalResult, playbackData, chart);
+    const payload = {
+      runId: playbackData.runId,
+      chartTitle: playbackData.chartTitle,
+      generatedAt: new Date().toISOString(),
+      summary,
+      comparison,
+      originalScore: originalResult.score,
+      replayScore: comparison.replayScore,
+      passed: summary.scoreMatch && summary.maxComboMatch && comparison.statsMatch,
+      noteCount: {
+        total: chart.notes.length,
+        originalJudged: originalResult.noteResults.length,
+        replayJudged: comparison.replayStats.perfect + comparison.replayStats.good + comparison.replayStats.miss
+      }
+    };
+    return JSON.stringify(payload, null, 2);
+  }
+
+  static batchReplayPlaybackData(
+    runs: Array<{ playbackData: PlaybackData; chart: ChartData }>,
+    passCondition: (result: GameResult, comparison: ReplayComparison) => boolean = (result, comp) => comp.scoreMatch && comp.statsMatch
+  ): BatchReplayResult {
+    const perRunResults: BatchReplayResult['perRunResults'] = [];
+    const totalFailureCategories: Record<FailureCategory, number> = {
+      wrong_track: 0,
+      path_incomplete: 0,
+      path_out_of_order: 0,
+      path_early: 0,
+      path_late: 0,
+      early_press: 0,
+      late_press: 0,
+      short_hold: 0,
+      timeout: 0,
+      no_input: 0
+    };
+    let totalNotes = 0;
+    let totalConsistentNotes = 0;
+    let passedRuns = 0;
+    for (const { playbackData, chart } of runs) {
+      const replayResult = RhythmSDK.replayPlaybackData(playbackData, chart);
+      const originalMap = new Map<string, JudgeResult>();
+      for (const r of playbackData.judgeResults) {
+        originalMap.set(r.noteId, r);
+      }
+      const replayMap = new Map<string, JudgeResult>();
+      for (const r of replayResult.noteResults) {
+        replayMap.set(r.noteId, r);
+      }
+      const allNoteIds = new Set([...originalMap.keys(), ...replayMap.keys()]);
+      const discrepancies: NoteDiscrepancy[] = [];
+      let consistent = 0;
+      for (const noteId of allNoteIds) {
+        const orig = originalMap.get(noteId);
+        const repl = replayMap.get(noteId);
+        if (!orig || !repl) {
+          discrepancies.push({
+            noteId,
+            originalLevel: orig?.level ?? JudgeLevel.MISS,
+            replayLevel: repl?.level ?? JudgeLevel.MISS,
+            originalOffset: orig?.offset ?? 0,
+            replayOffset: repl?.offset ?? 0
+          });
+        } else if (orig.level === repl.level) {
+          consistent++;
+        } else {
+          discrepancies.push({
+            noteId,
+            originalLevel: orig.level,
+            replayLevel: repl.level,
+            originalOffset: orig.offset,
+            replayOffset: repl.offset
+          });
+        }
+      }
+      totalNotes += allNoteIds.size;
+      totalConsistentNotes += consistent;
+      const consistencyRate = allNoteIds.size > 0 ? Math.round((consistent / allNoteIds.size) * 10000) / 100 : 100;
+      const comparison: ReplayComparison = {
+        scoreMatch: playbackData.judgeResults.length > 0
+          ? replayResult.score === RhythmSDK.calculateScoreFromResults(playbackData.judgeResults)
+          : true,
+        originalScore: playbackData.judgeResults.length > 0
+          ? RhythmSDK.calculateScoreFromResults(playbackData.judgeResults)
+          : replayResult.score,
+        replayScore: replayResult.score,
+        maxComboMatch: true,
+        originalMaxCombo: 0,
+        replayMaxCombo: replayResult.maxCombo,
+        statsMatch: true,
+        originalStats: { perfect: 0, good: 0, miss: 0 },
+        replayStats: { ...replayResult.stats },
+        noteDiscrepancies: discrepancies,
+        consistencyRate
+      };
+      const failures: string[] = [];
+      if (!comparison.scoreMatch) failures.push('score_mismatch');
+      if (!comparison.statsMatch) failures.push('stats_mismatch');
+      if (discrepancies.length > 0) failures.push(`note_mismatch:${discrepancies.length}`);
+      const passed = passCondition(replayResult, comparison);
+      if (passed) passedRuns++;
+      const runId = playbackData.runId || `run-${perRunResults.length}`;
+      const chartTitle = playbackData.chartTitle || chart.title;
+      for (const r of replayResult.noteResults) {
+        if (r.level === JudgeLevel.MISS && r.failureCategory) {
+          totalFailureCategories[r.failureCategory]++;
+        }
+      }
+      const touchStarts = playbackData.inputEvents.filter(e => e.type === 'touchstart').length;
+      const touchMoves = playbackData.inputEvents.filter(e => e.type === 'touchmove').length;
+      const touchEnds = playbackData.inputEvents.filter(e => e.type === 'touchend').length;
+      const pointerSet = new Set(playbackData.inputEvents.map(e => e.pointerId));
+      const times = playbackData.inputEvents.map(e => e.time);
+      const duration = times.length > 0 ? Math.max(...times) - Math.min(...times) : 0;
+      const failureBreakdown: Record<FailureCategory, number> = {
+        wrong_track: 0, path_incomplete: 0, path_out_of_order: 0,
+        path_early: 0, path_late: 0, early_press: 0, late_press: 0,
+        short_hold: 0, timeout: 0, no_input: 0
+      };
+      for (const r of replayResult.noteResults) {
+        if (r.level === JudgeLevel.MISS && r.failureCategory) {
+          failureBreakdown[r.failureCategory]++;
+        }
+      }
+      perRunResults.push({
+        runId,
+        chartTitle,
+        passed,
+        score: replayResult.score,
+        accuracy: replayResult.accuracy,
+        grade: replayResult.grade,
+        consistencyRate,
+        failures,
+        summary: {
+          discrepancies,
+          inputTrajectorySummary: {
+            totalEvents: playbackData.inputEvents.length,
+            touchStarts, touchMoves, touchEnds,
+            uniquePointers: pointerSet.size,
+            duration: Math.round(duration)
+          },
+          failureBreakdown,
+          consistencyRate,
+          scoreMatch: comparison.scoreMatch,
+          maxComboMatch: comparison.maxComboMatch
+        },
+        comparison
+      });
+    }
+    const totalRuns = runs.length;
+    const totalConsistencyRate = totalNotes > 0 ? Math.round((totalConsistentNotes / totalNotes) * 10000) / 100 : 100;
+    return {
+      totalRuns,
+      passedRuns,
+      failedRuns: totalRuns - passedRuns,
+      passRate: totalRuns > 0 ? Math.round((passedRuns / totalRuns) * 10000) / 100 : 100,
+      perRunResults,
+      failureCategories: totalFailureCategories,
+      generatedAt: new Date().toISOString(),
+      totalNotes,
+      totalConsistencyRate
+    };
+  }
+
+  private static calculateScoreFromResults(results: JudgeResult[]): number {
+    let score = 0;
+    let combo = 0;
+    for (const r of results.sort((a, b) => a.time - b.time)) {
+      if (r.level === JudgeLevel.PERFECT) {
+        combo++;
+        score += 1000 + Math.min(50, Math.floor(combo / 10)) * 10;
+      } else if (r.level === JudgeLevel.GOOD) {
+        combo++;
+        score += 500 + Math.min(50, Math.floor(combo / 10)) * 10;
+      } else {
+        combo = 0;
+      }
+    }
+    return score;
   }
 
   static replayPlaybackData(
@@ -493,6 +690,8 @@ export class RhythmSDK {
     }
     sdk.initialize();
     sdk.setPlaybackMode(true, playbackData);
+    const allNotes = sdk.chartReader.getNotes();
+    sdk.judge.registerPendingNotes(allNotes);
     let lastEventTime = 0;
     for (const e of playbackData.inputEvents) {
       if (e.time > lastEventTime) lastEventTime = e.time;
@@ -503,12 +702,10 @@ export class RhythmSDK {
     const step = 16;
     while (simTime < simDuration) {
       sdk.inputManager.updatePlayback(simTime);
-      const upcomingNotes = sdk.chartReader.getUpcomingNotes(simTime - 100, sdk.pendingNoteWindow);
-      sdk.judge.registerPendingNotes(upcomingNotes);
       sdk.judge.update(simTime);
       simTime += step;
     }
-    sdk.judge.checkMissedNotes();
+    sdk.judge.checkMissedNotes(simTime);
     const result = sdk.getResult();
     sdk.destroy();
     return result;
